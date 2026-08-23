@@ -1,0 +1,36 @@
+{
+  "name": "pi-git-auto-sync",
+  "version": "1.0.0",
+  "description": "Pi extension that auto-syncs a git repo by delegating merge/commit/push to the main agent — with persisted config (on/off, idle window, poll interval, startup sync)",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "git",
+    "auto-sync",
+    "commit",
+    "push"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.84.2",
+    "@types/node": "^20.19.33",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.18"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run typecheck && npm run test && npm run build"
+  },
+  "pi": {
+    "extensions": [
+      "./src/git-auto-sync.ts"
+    ]
+  }
+}

@@ -1,0 +1,412 @@
+/**
+ * Git Auto-Sync (pi package)
+ *
+ * Thin polling layer that monitors repo state and delegates git work to the
+ * main agent (which has full tool access — read, bash, write, edit).
+ *
+ * On session start it fetches origin and, if behind @{u}, fast-forwards a
+ * clean tree by itself or hands the merge to the main agent.
+ *
+ * When the repo stays dirty for the configured idle window, the extension
+ * crafts a prompt and sends it via `sendUserMessage()`. The main agent then:
+ *   1. Fetches origin
+ *   2. Merges @{u} (resolving conflicts with full context)
+ *   3. Reviews the diff
+ *   4. Generates a conventional commit message
+ *   5. Stages, commits, pushes
+ *
+ * Config (see config.ts) — built-in defaults < global < project:
+ *   global:  ~/.pi/agent/git-auto-sync.json  (manual user defaults, never written here)
+ *   project: <repo>/.pi/git-auto-sync.json   (written by /git-sync set)
+ *   keys:    enabled, startupSync, idleMs, pollMs
+ *
+ * Commands:
+ *   /git-sync                 force a sync now (works even when disabled)
+ *   /git-sync status          show the effective config
+ *   /git-sync on | off        persist + apply the master switch
+ *   /git-sync pause | resume  runtime only, not persisted
+ *   /git-sync set idle 45m    persist idle window   (45m / 15s / 2h / raw ms)
+ *   /git-sync set poll 15s    persist poll interval (min 1s)
+ *   /git-sync set enabled false
+ *   /git-sync set startup true
+ *
+ * Headless-safe visibility: the footer (setStatus) is only visible while a
+ * TUI is attached, so lifecycle events that matter without a terminal —
+ * startup fast-forward pull — are ALSO recorded as session user messages
+ * (via `record()`). Those messages are explicitly marked informational.
+ */
+
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  ExtensionCommandContext,
+  ExtensionContext,
+  SessionStartEvent,
+} from "@earendil-works/pi-coding-agent";
+import {
+  DEFAULTS,
+  MIN_IDLE_MS,
+  MIN_POLL_MS,
+  type GitAutoSyncConfig,
+  loadConfig,
+  parseDuration,
+  projectConfigPath,
+  saveConfig,
+} from "./config";
+
+type Cfg = Required<GitAutoSyncConfig>;
+
+let timer: ReturnType<typeof setInterval> | null = null;
+let gCtx: ExtensionContext | null = null;
+let cfg: Cfg = { ...DEFAULTS };
+let dirtyAt = 0;
+let dirty = false;
+let busy = false;
+let prevPaths: Set<string> = new Set();
+let piApi: ExtensionAPI | null = null;
+let startupDone = false; // tick must not clobber the footer while startup sync runs
+let execFn: (cmd: string, args: string[], options?: { timeout?: number }) => Promise<{
+  stdout: string;
+  stderr?: string;
+  code: number;
+}>;
+
+function footer(text: string) {
+  if (gCtx?.hasUI) gCtx.ui.setStatus("git-sync", text);
+}
+
+function toast(msg: string, kind: "info" | "warning" | "error" = "info") {
+  if (gCtx?.hasUI) gCtx.ui.notify(msg, kind);
+}
+
+function humanDuration(ms: number): string {
+  if (ms % 3_600_000 === 0) return `${ms / 3_600_000} h`;
+  if (ms % 60_000 === 0) return `${ms / 60_000} min`;
+  if (ms >= 1000) return `${Math.round(ms / 1000)} s`;
+  return `${Math.round(ms)} ms`;
+}
+
+/**
+ * Persistent, headless-safe visibility: record an event as a session user
+ * message so it shows up in the transcript even when no TUI was attached.
+ * The message tells the agent it is informational unless it says otherwise.
+ */
+function record(msg: string) {
+  if (!piApi) return;
+  piApi.sendUserMessage(
+    `[git-auto-sync] ${msg} (informational — no git work requested unless the message says otherwise)`,
+  );
+}
+
+function reload() {
+  if (!gCtx) return;
+  cfg = loadConfig(gCtx.cwd, getAgentDir());
+}
+
+/* ---------- trigger main agent ---------- */
+function triggerSync(count: number) {
+  if (!piApi) return;
+
+  const prompt = [
+    `[git-auto-sync] Repo has been dirty for ${humanDuration(cfg.idleMs)} or more.`,
+    `${count} file(s) changed.`,
+    "",
+    "Please perform git sync:",
+    "1. `git fetch origin`",
+    "2. `git merge @{u}` — if conflicts exist, resolve them by reading full conflicted files and choosing the correct code",
+    "3. `git status --short` and `git diff --stat` to review ALL changes (including untracked new files)",
+    "4. Generate a conventional commit message, stage all changes (git add -A or specific paths), commit + push",
+    "5. If push fails because remote advanced: fetch + merge + retry push",
+    "",
+    "Skip if there are no local changes remaining. Run all commands relative to the repo root.",
+  ].join("\n");
+
+  piApi.sendUserMessage(prompt);
+  toast(`Triggered git sync (${count} file(s))`, "info");
+}
+
+/* ---------- startup sync with remote ---------- */
+async function startupSync() {
+  footer("fetching origin...");
+
+  const fetch = await execFn("git", ["fetch", "origin"], { timeout: 60_000 });
+  if (fetch.code !== 0) {
+    footer("fetch failed");
+    toast("git-auto-sync: fetch failed", "warning");
+    return;
+  }
+
+  const behind = await execFn("git", ["rev-list", "--count", "HEAD..@{u}"]);
+  if (behind.code !== 0) {
+    footer("up to date");
+    return;
+  }
+  const n = parseInt(behind.stdout.trim(), 10) || 0;
+  if (n === 0) {
+    footer("up to date");
+    return;
+  }
+
+  // Clean tree: fast-forward + push by ourselves, no LLM turn needed
+  const status = await execFn("git", ["status", "--porcelain"]);
+  const clean = status.code === 0 && status.stdout.trim().length === 0;
+  if (clean) {
+    const merge = await execFn("git", ["merge", "--ff-only", "@{u}", "--no-edit"], { timeout: 60_000 });
+    if (merge.code === 0) {
+      const push = await execFn("git", ["push"], { timeout: 60_000 });
+      footer(`synced: +${n} commit(s) from origin`);
+      toast(`git-auto-sync: pulled ${n} commit(s)${push.code === 0 ? ", pushed" : ""}`, "info");
+      // Headless-safe record: this pull happened without anyone watching.
+      record(
+        `On startup, local was behind origin by ${n} commit(s); fast-forwarded` +
+          `${push.code === 0 ? " and pushed" : ""}. Nothing further is needed.`,
+      );
+      return;
+    }
+  }
+  // Dirty tree or non-FF merge: main agent handles it
+  footer(`behind origin by ${n}, asking agent...`);
+  piApi?.sendUserMessage(
+    [
+      "[git-auto-sync] On startup, local is behind origin by",
+      `${n} commit(s). Please sync with the remote:`,
+      "",
+      "1. `git fetch origin`",
+      "2. `git merge @{u}` — if conflicts exist, resolve them by reading full conflicted files and choosing the correct code",
+      "3. If the tree was dirty, commit the local changes first (conventional message), then merge",
+      "4. `git push` when the merge is complete",
+    ].join("\n"),
+  );
+  toast(`git-auto-sync: asked agent to pull ${n} commit(s)`, "info");
+}
+
+/* ---------- poll tick ---------- */
+async function tick() {
+  if (busy) return;
+  busy = true;
+
+  try {
+    const { stdout, code } = await execFn("git", ["status", "--porcelain"]);
+    if (code !== 0) {
+      dirty = false;
+      dirtyAt = 0;
+      prevPaths.clear();
+      if (startupDone) footer("not a repo");
+      return;
+    }
+
+    const d = stdout.trim().length > 0;
+    const count = stdout.trim().split("\n").filter(Boolean).length;
+
+    if (d) {
+      const cur = new Set(
+        stdout.trim().split("\n").map((l) => l.slice(3)),
+      );
+      const changed =
+        prevPaths.size === 0 ||
+        prevPaths.size !== cur.size ||
+        [...cur].some((p) => !prevPaths.has(p));
+      if (changed) {
+        dirtyAt = Date.now();
+        dirty = true;
+      }
+      prevPaths = cur;
+    }
+    if (!d && dirty) {
+      dirty = false;
+      dirtyAt = 0;
+      prevPaths.clear();
+      if (startupDone) footer("clean");
+      return;
+    }
+    if (!d) {
+      if (startupDone) footer("clean");
+      return;
+    }
+
+    const elapsed = Date.now() - dirtyAt;
+    const rem = Math.max(0, Math.ceil((cfg.idleMs - elapsed) / 1000));
+    if (startupDone) footer(`${count} changed, syncing in ${rem}s`);
+
+    if (elapsed >= cfg.idleMs) {
+      dirty = false;
+      dirtyAt = 0;
+      prevPaths.clear();
+      triggerSync(count);
+    }
+  } finally {
+    busy = false;
+  }
+}
+
+/* ---------- start / stop ---------- */
+function go() {
+  if (timer) return;
+  timer = setInterval(tick, cfg.pollMs);
+}
+
+function restartPolling() {
+  if (timer) clearInterval(timer);
+  timer = null;
+  if (cfg.enabled) go();
+}
+
+function halt() {
+  if (timer) {
+    clearInterval(timer);
+    timer = null;
+  }
+  dirty = false;
+  dirtyAt = 0;
+  busy = false;
+  prevPaths.clear();
+}
+
+/* ---------- commands ---------- */
+function statusText(cwd: string): string {
+  const lines = [
+    `git-auto-sync: ${cfg.enabled ? "on" : "off"} · startup: ${cfg.startupSync ? "on" : "off"} · idle: ${humanDuration(cfg.idleMs)} · poll: ${humanDuration(cfg.pollMs)}`,
+    `project config: ${projectConfigPath(cwd)}`,
+  ];
+  return lines.join("\n");
+}
+
+async function applySet(cwd: string, key: string, raw: string, c: ExtensionCommandContext): Promise<void> {
+  const note = (msg: string, kind: "info" | "warning" | "error" = "info") => c.ui.notify(msg, kind);
+
+  if (key === "idle" || key === "poll") {
+    const ms = parseDuration(raw);
+    if (ms === null) {
+      note(`Invalid duration: ${raw} (use e.g. 45m, 15s, 2h, or raw ms)`, "error");
+      return;
+    }
+    const min = key === "idle" ? MIN_IDLE_MS : MIN_POLL_MS;
+    if (ms < min) {
+      note(`${key} must be at least ${humanDuration(min)}`, "error");
+      return;
+    }
+    const patch: GitAutoSyncConfig = key === "idle" ? { idleMs: ms } : { pollMs: ms };
+    if (!saveConfig(cwd, patch)) {
+      note(`Could not write ${projectConfigPath(cwd)} — applying for this session only`, "warning");
+      cfg = { ...cfg, ...patch };
+      return;
+    }
+    reload();
+    if (key === "poll") restartPolling();
+    note(`git-auto-sync: ${key} = ${humanDuration(cfg[key === "idle" ? "idleMs" : "pollMs"])} (saved)`);
+    return;
+  }
+
+  if (key === "enabled" || key === "startup") {
+    const b = raw === "true" || raw === "1" || raw === "on";
+    if (!(raw === "true" || raw === "false" || raw === "1" || raw === "0" || raw === "on" || raw === "off")) {
+      note(`Invalid value: ${raw} (use true/false)`, "error");
+      return;
+    }
+    const patch: GitAutoSyncConfig = key === "enabled" ? { enabled: b } : { startupSync: b };
+    const saved = saveConfig(cwd, patch);
+    cfg = { ...cfg, ...patch };
+    if (key === "enabled") {
+      if (b) go();
+      else halt();
+      footer(b ? "on" : "disabled");
+    }
+    note(`git-auto-sync: ${key} = ${b}${saved ? " (saved)" : " (session only)"}`);
+  }
+}
+
+/* ---------- extension entry ---------- */
+export default function (pi: ExtensionAPI) {
+  piApi = pi;
+  execFn = pi.exec.bind(pi) as typeof execFn;
+
+  pi.on("session_start", async (_ev: SessionStartEvent, c: ExtensionContext) => {
+    gCtx = c;
+    cfg = loadConfig(c.cwd, getAgentDir());
+
+    if (!cfg.enabled) {
+      startupDone = true;
+      footer("disabled");
+      return;
+    }
+
+    go();
+    footer("starting...");
+    if (cfg.startupSync) {
+      // Race the sync against a timeout so a hung fetch can't hold the footer forever.
+      // Clear the watchdog when the race settles so it never keeps the process alive.
+      let watchdog: ReturnType<typeof setTimeout> | undefined;
+      Promise.race([
+        startupSync(),
+        new Promise<void>((r) => {
+          watchdog = setTimeout(r, 90_000);
+        }),
+      ]).finally(() => {
+        clearTimeout(watchdog);
+        startupDone = true;
+      });
+    } else {
+      startupDone = true;
+    }
+  });
+
+  pi.on("session_shutdown", async () => {
+    halt();
+    gCtx = null;
+  });
+
+  pi.registerCommand("git-sync", {
+    description: "Force git sync now, or on/off/pause/resume and configure auto-sync",
+    handler: async (args: string, c: ExtensionCommandContext) => {
+      const [cmd, key, ...rest] = args.trim().split(/\s+/).filter(Boolean);
+      const value = rest.join(" ");
+
+      if (!cmd) {
+        // Default: force sync now
+        const { stdout, code } = await execFn("git", ["status", "--porcelain"]);
+        if (code !== 0 || stdout.trim().length === 0) {
+          c.ui.notify("No changes to sync", "info");
+          return;
+        }
+        const count = stdout.trim().split("\n").filter(Boolean).length;
+        triggerSync(count);
+        c.ui.notify("Sync request sent to main agent", "info");
+        return;
+      }
+
+      switch (cmd) {
+        case "status":
+          c.ui.notify(statusText(c.cwd), "info");
+          return;
+        case "on":
+          await applySet(c.cwd, "enabled", "true", c);
+          return;
+        case "off":
+          await applySet(c.cwd, "enabled", "false", c);
+          return;
+        case "pause":
+          halt();
+          c.ui.notify("Auto-sync paused (runtime only — use /git-sync off to persist)", "info");
+          return;
+        case "resume":
+          if (cfg.enabled) go();
+          c.ui.notify("Auto-sync resumed (no-op if /git-sync off was set)", "info");
+          return;
+        case "set": {
+          if (!key || !value) {
+            c.ui.notify("Usage: /git-sync set <idle|poll|enabled|startup> <value>", "error");
+            return;
+          }
+          if (!["idle", "poll", "enabled", "startup"].includes(key)) {
+            c.ui.notify(`Unknown key: ${key} (use idle, poll, enabled, startup)`, "error");
+            return;
+          }
+          await applySet(c.cwd, key, value, c);
+          return;
+        }
+        default:
+          c.ui.notify("Usage: /git-sync [status|on|off|pause|resume|set <key> <value>]", "error");
+      }
+    },
+  });
+}
