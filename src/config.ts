@@ -1,15 +1,14 @@
 // Persistence for pi-git-auto-sync settings.
-// - Global:  ~/.pi/agent/git-auto-sync.json — manual user defaults, never written here
-// - Project: <cwd>/.pi/git-auto-sync.json — written by /git-sync set; overrides global on load
+// CWD-scoped only — per repo, no global/user-wide layer.
+// File: <cwd>/.pi/git-auto-sync.json — written by /git-sync set.
 //
-// Precedence: built-in defaults < global < project.
+// Precedence: built-in defaults < CWD file.
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 export interface GitAutoSyncConfig {
-  /** Master switch. Default true. When false: no polling, no startup sync. */
+  /** Master switch. Default false. When false: no polling, no startup sync. */
   enabled?: boolean;
   /** Fetch + fast-forward on session start. Default true. */
   startupSync?: boolean;
@@ -20,7 +19,7 @@ export interface GitAutoSyncConfig {
 }
 
 export const DEFAULTS: Required<GitAutoSyncConfig> = {
-  enabled: true,
+  enabled: false,
   startupSync: true,
   idleMs: 30 * 60 * 1000,
   pollMs: 10_000,
@@ -71,14 +70,11 @@ function read(path: string): GitAutoSyncConfig {
   }
 }
 
-/** Effective config: built-in defaults < global file < project file. */
-export function loadConfig(cwd: string, agentDir: string = getAgentDir()): Required<GitAutoSyncConfig> {
-  return { ...DEFAULTS, ...read(join(agentDir, FILE)), ...read(join(cwd, ".pi", FILE)) };
+/** Effective config: built-in defaults < CWD file. */
+export function loadConfig(cwd: string): Required<GitAutoSyncConfig> {
+  return { ...DEFAULTS, ...read(join(cwd, ".pi", FILE)) };
 }
 
-export function globalConfigPath(agentDir: string = getAgentDir()): string {
-  return join(agentDir, FILE);
-}
 
 export function projectConfigPath(cwd: string): string {
   return join(cwd, ".pi", FILE);

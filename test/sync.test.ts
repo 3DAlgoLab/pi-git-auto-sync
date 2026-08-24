@@ -1,13 +1,7 @@
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
-// Redirect the global config dir to a temp dir so tests never touch ~/.pi/agent.
-const mockState = vi.hoisted(() => ({ agentDir: "" }));
-vi.mock("@earendil-works/pi-coding-agent", () => ({
-  getAgentDir: () => mockState.agentDir,
-}));
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import gitAutoSync from "../src/git-auto-sync";
 
@@ -102,7 +96,6 @@ let started = false;
 
 beforeEach(() => {
   cwd = mkdtempSync(join(tmpdir(), "gas-sync-"));
-  mockState.agentDir = mkdtempSync(join(tmpdir(), "gas-agent-"));
   started = false;
 });
 
@@ -111,12 +104,11 @@ afterEach(() => {
     api.handlers.get("session_shutdown")?.forEach((h) => h(undefined, undefined));
   }
   rmSync(cwd, { recursive: true, force: true });
-  rmSync(mockState.agentDir, { recursive: true, force: true });
 });
 
 function projectConfig(obj: object) {
   mkdirSync(join(cwd, ".pi"), { recursive: true });
-  writeFileSync(join(cwd, ".pi", "git-auto-sync.json"), JSON.stringify(obj));
+  writeFileSync(join(cwd, ".pi", "git-auto-sync.json"), JSON.stringify({ enabled: true, ...obj }));
 }
 
 function readProjectConfig(): Record<string, unknown> {
@@ -124,6 +116,8 @@ function readProjectConfig(): Record<string, unknown> {
 }
 
 function boot(git: GitState) {
+  // Fixture default: an opted-in user (built-in default is off). Explicit projectConfig() calls win.
+  if (!existsSync(join(cwd, ".pi", "git-auto-sync.json"))) projectConfig({});
   api = makeApi(git);
   gitAutoSync(api as never);
   const { ctx } = sessionCtx(cwd);

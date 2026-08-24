@@ -15,9 +15,8 @@
  *   4. Generates a conventional commit message
  *   5. Stages, commits, pushes
  *
- * Config (see config.ts) — built-in defaults < global < project:
- *   global:  ~/.pi/agent/git-auto-sync.json  (manual user defaults, never written here)
- *   project: <repo>/.pi/git-auto-sync.json   (written by /git-sync set)
+ * Config (see config.ts) — CWD-scoped, per repo: built-in defaults < CWD file:
+ *   <cwd>/.pi/git-auto-sync.json   (written by /git-sync set)
  *   keys:    enabled, startupSync, idleMs, pollMs
  *
  * Commands:
@@ -36,7 +35,6 @@
  * (via `record()`). Those messages are explicitly marked informational.
  */
 
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
@@ -100,7 +98,7 @@ function record(msg: string) {
 
 function reload() {
   if (!gCtx) return;
-  cfg = loadConfig(gCtx.cwd, getAgentDir());
+  cfg = loadConfig(gCtx.cwd);
 }
 
 /* ---------- trigger main agent ---------- */
@@ -322,8 +320,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", async (_ev: SessionStartEvent, c: ExtensionContext) => {
     gCtx = c;
-    cfg = loadConfig(c.cwd, getAgentDir());
-
+    cfg = loadConfig(c.cwd);
     if (!cfg.enabled) {
       startupDone = true;
       footer("disabled");

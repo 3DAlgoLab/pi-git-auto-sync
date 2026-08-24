@@ -5,6 +5,7 @@ Pi extension that auto-syncs a git repo by delegating the git work to the main a
 The extension is a thin polling layer. It never commits or pushes on a dirty tree — it watches repo state and, when it decides a sync is due, sends the main agent a precise prompt. The agent (with full tool access) fetches, merges `@{u}` with conflict resolution, reviews the diff, writes a conventional commit, and pushes.
 
 ## Behavior
+The extension installs **off** by default. Enable it with `/git-sync on` (or `"enabled": true` in a config file).
 
 - **Startup sync** — on session start: `git fetch origin`; if behind `@{u}` with a clean tree, fast-forward + push happens by itself (no LLM turn, recorded as an informational session message for headless visibility). If the tree is dirty, the merge is handed to the agent.
 - **Idle trigger** — when the repo stays dirty for the configured idle window (default 30 min), the agent is asked to sync. New changes reset the window.
@@ -12,20 +13,27 @@ The extension is a thin polling layer. It never commits or pushes on a dirty tre
 
 ## Install
 
+This package is distributed via git — it is not published to npm.
+
 ```bash
-pi install /home/j2y/dev_pi/pi-git-auto-sync   # local path
-# or, once published:
-pi install npm:pi-git-auto-sync
+pi install git:github.com/3DAlgoLab/pi-git-auto-sync
+# or with a raw URL:
+pi install https://github.com/3DAlgoLab/pi-git-auto-sync
+# pin a tag or commit:
+pi install git:github.com/3DAlgoLab/pi-git-auto-sync@v1.0.0
+# or from a local checkout:
+pi install /path/to/pi-git-auto-sync
 ```
+
+Git packages are cloned to `~/.pi/agent/git/github.com/3DAlgoLab/pi-git-auto-sync`; update them with `pi update --extensions` or reinstall with a new ref.
 
 ## Config
 
-Three layers, later wins: **built-in defaults < global < project.**
+Two layers, later wins: **built-in defaults < CWD file.** Scoping is per-repo — there is no global/user-wide config.
 
 | File | Written by | Purpose |
 | --- | --- | --- |
-| `~/.pi/agent/git-auto-sync.json` | you, by hand | user-wide defaults |
-| `<repo>/.pi/git-auto-sync.json` | `/git-sync set` | per-repo overrides (lives in gitignored `.pi/`) |
+| `<cwd>/.pi/git-auto-sync.json` | `/git-sync set` | per-repo config (lives in gitignored `.pi/`) |
 
 ```json
 {
@@ -38,7 +46,7 @@ Three layers, later wins: **built-in defaults < global < project.**
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `enabled` | `true` | master switch — off: no polling, no startup sync |
+| `enabled` | `false` | master switch — the extension installs **off**; run `/git-sync on` (or set `enabled: true`) to activate. Off: no polling, no startup sync |
 | `startupSync` | `true` | fetch + fast-forward on session start |
 | `idleMs` | `1800000` | how long the repo may stay dirty before an auto-sync (min 1 min) |
 | `pollMs` | `10000` | poll interval (min 1 s) |

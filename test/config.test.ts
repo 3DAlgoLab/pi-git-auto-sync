@@ -6,7 +6,6 @@ import {
   DEFAULTS,
   MIN_IDLE_MS,
   MIN_POLL_MS,
-  globalConfigPath,
   loadConfig,
   parseDuration,
   projectConfigPath,
@@ -55,34 +54,34 @@ describe("loadConfig", () => {
     expect(loadConfig(cwd, agentDir)).toEqual(DEFAULTS);
   });
 
-  it("global file overrides defaults", () => {
-    writeFileSync(join(agentDir, "git-auto-sync.json"), JSON.stringify({ idleMs: 600_000 }));
-    const cfg = loadConfig(cwd, agentDir);
+  it("cwd file overrides defaults", () => {
+    mkdirSync(join(cwd, ".pi"), { recursive: true });
+    writeFileSync(join(cwd, ".pi", "git-auto-sync.json"), JSON.stringify({ idleMs: 600_000 }));
+    const cfg = loadConfig(cwd);
     expect(cfg.idleMs).toBe(600_000);
     expect(cfg.pollMs).toBe(DEFAULTS.pollMs);
   });
 
-  it("project file overrides global", () => {
-    writeFileSync(join(agentDir, "git-auto-sync.json"), JSON.stringify({ idleMs: 600_000, enabled: false }));
-    mkdirSync(join(cwd, ".pi"), { recursive: true });
-    writeFileSync(join(cwd, ".pi", "git-auto-sync.json"), JSON.stringify({ idleMs: 300_000 }));
-    const cfg = loadConfig(cwd, agentDir);
-    expect(cfg.idleMs).toBe(300_000);
-    expect(cfg.enabled).toBe(false); // global key still applies
+  it("files outside the CWD are ignored (per-repo scope)", () => {
+    writeFileSync(join(agentDir, "git-auto-sync.json"), JSON.stringify({ idleMs: 600_000, enabled: true }));
+    const cfg = loadConfig(cwd);
+    expect(cfg).toEqual(DEFAULTS);
   });
 
   it("skips malformed files without throwing", () => {
-    writeFileSync(join(agentDir, "git-auto-sync.json"), "{ not json");
-    const cfg = loadConfig(cwd, agentDir);
+    mkdirSync(join(cwd, ".pi"), { recursive: true });
+    writeFileSync(join(cwd, ".pi", "git-auto-sync.json"), "{ not json");
+    const cfg = loadConfig(cwd);
     expect(cfg).toEqual(DEFAULTS);
   });
 
   it("drops unknown keys and wrong types", () => {
+    mkdirSync(join(cwd, ".pi"), { recursive: true });
     writeFileSync(
-      join(agentDir, "git-auto-sync.json"),
+      join(cwd, ".pi", "git-auto-sync.json"),
       JSON.stringify({ enabled: "yes", idleMs: "30m", pollMs: -1, bogus: 42 }),
     );
-    const cfg = loadConfig(cwd, agentDir);
+    const cfg = loadConfig(cwd);
     expect(cfg).toEqual(DEFAULTS);
   });
 });
@@ -97,7 +96,7 @@ describe("saveConfig", () => {
 
   it("creates .pi/ if missing", () => {
     expect(saveConfig(cwd, { enabled: false })).toBe(true);
-    const cfg = loadConfig(cwd, agentDir);
+    const cfg = loadConfig(cwd);
     expect(cfg.enabled).toBe(false);
   });
 
@@ -109,7 +108,6 @@ describe("saveConfig", () => {
   });
 
   it("exposes stable paths", () => {
-    expect(globalConfigPath(agentDir)).toBe(join(agentDir, "git-auto-sync.json"));
     expect(projectConfigPath(cwd)).toBe(join(cwd, ".pi", "git-auto-sync.json"));
   });
 });
