@@ -29,10 +29,15 @@
  *   /git-sync set enabled false
  *   /git-sync set startup true
  *
- * Headless-safe visibility: the footer (setStatus) is only visible while a
- * TUI is attached, so lifecycle events that matter without a terminal —
- * startup fast-forward pull — are ALSO recorded as session user messages
- * (via `record()`). Those messages are explicitly marked informational.
+ * Headless-safe visibility: the status line is only visible while a TUI is
+ * attached, so lifecycle events that matter without a terminal — startup
+ * fast-forward pull — are ALSO recorded as session user messages (via
+ * `record()`). Those messages are explicitly marked informational.
+ *
+ * Brand-aware display: pi and prime-agent are different TUIs. pi renders
+ * the extension footer (setStatus); prime-agent's TUI hides the footer, so
+ * there the status is shown as a widget above the editor (setWidget).
+ * The hosting agent is detected at session start (see detectBrand()).
  */
 
 import type {
@@ -69,8 +74,42 @@ let execFn: (cmd: string, args: string[], options?: { timeout?: number }) => Pro
   code: number;
 }>;
 
-function footer(text: string) {
-  if (gCtx?.hasUI) gCtx.ui.setStatus("git-sync", text);
+type Brand = "pi" | "prime-agent" | "unknown";
+let brand: Brand = "unknown";
+
+/**
+ * Detect which coding agent hosts this extension so the status can use a
+ * surface that is actually visible in that TUI:
+ *   pi          -> footer (setStatus)
+ *   prime-agent -> widget (setWidget) — its TUI hides the footer
+ * Both hosts set process.title from their own package.json piConfig.name at
+ * startup ("pi" / "pi-rpc" vs "prime-agent"). If the title is missing or
+ * was overwritten, fall back to the host loader path in the call stack.
+ */
+function detectBrand(): Brand {
+  const t = typeof process.title === "string" ? process.title : "";
+  if (t.startsWith("prime-agent")) return "prime-agent";
+  if (t === "pi" || t === "pi-rpc") return "pi";
+  try {
+    const stack = new Error().stack ?? "";
+    if (stack.includes("prime-agent/dist")) return "prime-agent";
+    if (stack.includes("pi-coding-agent/dist")) return "pi";
+  } catch {
+    /* non-fatal — fall through to unknown */
+  }
+  return "unknown";
+}
+
+/** Brand-aware status line: widget on prime-agent, footer on pi. */
+function display(text: string) {
+  if (!gCtx?.hasUI) return;
+  const ui = gCtx.ui;
+  // Unknown host (tests, future brands): prefer the widget if the runtime
+  // exposes it, otherwise fall back to the footer.
+  const useWidget =
+    brand === "prime-agent" || (brand === "unknown" && typeof ui.setWidget === "function");
+  if (useWidget) ui.setWidget("git-sync", [`git-sync: ${text}`]);
+  else ui.setStatus("git-sync", text);
 }
 
 function toast(msg: string, kind: "info" | "warning" | "error" = "info") {
@@ -125,23 +164,23 @@ function triggerSync(count: number) {
 
 /* ---------- startup sync with remote ---------- */
 async function startupSync() {
-  footer("fetching origin...");
+  display("fetching origin...");
 
   const fetch = await execFn("git", ["fetch", "origin"], { timeout: 60_000 });
   if (fetch.code !== 0) {
-    footer("fetch failed");
+    display("fetch failed");
     toast("git-auto-sync: fetch failed", "warning");
     return;
   }
 
   const behind = await execFn("git", ["rev-list", "--count", "HEAD..@{u}"]);
   if (behind.code !== 0) {
-    footer("up to date");
+    display("up to date");
     return;
   }
   const n = parseInt(behind.stdout.trim(), 10) || 0;
   if (n === 0) {
-    footer("up to date");
+    display("up to date");
     return;
   }
 
@@ -152,7 +191,7 @@ async function startupSync() {
     const merge = await execFn("git", ["merge", "--ff-only", "@{u}", "--no-edit"], { timeout: 60_000 });
     if (merge.code === 0) {
       const push = await execFn("git", ["push"], { timeout: 60_000 });
-      footer(`synced: +${n} commit(s) from origin`);
+      display(`synced: +${n} commit(s) from origin`);
       toast(`git-auto-sync: pulled ${n} commit(s)${push.code === 0 ? ", pushed" : ""}`, "info");
       // Headless-safe record: this pull happened without anyone watching.
       record(
@@ -163,7 +202,7 @@ async function startupSync() {
     }
   }
   // Dirty tree or non-FF merge: main agent handles it
-  footer(`behind origin by ${n}, asking agent...`);
+  display(`behind origin by ${n}, asking agent...`);
   piApi?.sendUserMessage(
     [
       "[git-auto-sync] On startup, local is behind origin by",
@@ -189,7 +228,7 @@ async function tick() {
       dirty = false;
       dirtyAt = 0;
       prevPaths.clear();
-      if (startupDone) footer("not a repo");
+      if (startupDone) display("not a repo");
       return;
     }
 
@@ -214,17 +253,17 @@ async function tick() {
       dirty = false;
       dirtyAt = 0;
       prevPaths.clear();
-      if (startupDone) footer("clean");
+      if (startupDone) display("clean");
       return;
     }
     if (!d) {
-      if (startupDone) footer("clean");
+      if (startupDone) display("clean");
       return;
     }
 
     const elapsed = Date.now() - dirtyAt;
     const rem = Math.max(0, Math.ceil((cfg.idleMs - elapsed) / 1000));
-    if (startupDone) footer(`${count} changed, syncing in ${rem}s`);
+    if (startupDone) display(`${count} changed, syncing in ${rem}s`);
 
     if (elapsed >= cfg.idleMs) {
       dirty = false;
@@ -262,8 +301,9 @@ function halt() {
 
 /* ---------- commands ---------- */
 function statusText(cwd: string): string {
+  const surface = brand === "prime-agent" ? "widget" : brand === "pi" ? "footer" : "auto";
   const lines = [
-    `git-auto-sync: ${cfg.enabled ? "on" : "off"} · startup: ${cfg.startupSync ? "on" : "off"} · idle: ${humanDuration(cfg.idleMs)} · poll: ${humanDuration(cfg.pollMs)}`,
+    `git-auto-sync: ${cfg.enabled ? "on" : "off"} · startup: ${cfg.startupSync ? "on" : "off"} · idle: ${humanDuration(cfg.idleMs)} · poll: ${humanDuration(cfg.pollMs)} · host: ${brand} · display: ${surface}`,
     `project config: ${projectConfigPath(cwd)}`,
   ];
   return lines.join("\n");
@@ -307,7 +347,7 @@ async function applySet(cwd: string, key: string, raw: string, c: ExtensionComma
     if (key === "enabled") {
       if (b) go();
       else halt();
-      footer(b ? "on" : "disabled");
+      display(b ? "on" : "disabled");
     }
     note(`git-auto-sync: ${key} = ${b}${saved ? " (saved)" : " (session only)"}`);
   }
@@ -320,15 +360,16 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", async (_ev: SessionStartEvent, c: ExtensionContext) => {
     gCtx = c;
+    brand = detectBrand();
     cfg = loadConfig(c.cwd);
     if (!cfg.enabled) {
       startupDone = true;
-      footer("disabled");
+      display("disabled");
       return;
     }
 
     go();
-    footer("starting...");
+    display("starting...");
     if (cfg.startupSync) {
       // Race the sync against a timeout so a hung fetch can't hold the footer forever.
       // Clear the watchdog when the race settles so it never keeps the process alive.
@@ -348,6 +389,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async () => {
+    if (gCtx?.hasUI && brand === "prime-agent") gCtx.ui.setWidget("git-sync", undefined);
     halt();
     gCtx = null;
   });

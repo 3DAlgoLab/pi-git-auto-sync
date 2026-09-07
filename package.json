@@ -1,7 +1,7 @@
 {
   "name": "pi-git-auto-sync",
-  "version": "1.0.0",
-  "description": "Pi extension that auto-syncs a git repo by delegating merge/commit/push to the main agent — with persisted config (on/off, idle window, poll interval, startup sync)",
+  "version": "1.1.0",
+  "description": "Pi extension that auto-syncs a git repo by delegating merge/commit/push to the main agent \u2014 with persisted config (on/off, idle window, poll interval, startup sync)",
   "license": "MIT",
   "keywords": [
     "pi-package",
