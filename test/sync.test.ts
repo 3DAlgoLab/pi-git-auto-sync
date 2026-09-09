@@ -115,14 +115,15 @@ function readProjectConfig(): Record<string, unknown> {
   return JSON.parse(readFileSync(join(cwd, ".pi", "git-auto-sync.json"), "utf-8"));
 }
 
-function boot(git: GitState) {
+function boot(git: GitState): () => string {
   // Fixture default: an opted-in user (built-in default is off). Explicit projectConfig() calls win.
   if (!existsSync(join(cwd, ".pi", "git-auto-sync.json"))) projectConfig({});
   api = makeApi(git);
   gitAutoSync(api as never);
-  const { ctx } = sessionCtx(cwd);
-  api.handlers.get("session_start")?.forEach((h) => h(undefined, ctx));
+  const s = sessionCtx(cwd);
+  api.handlers.get("session_start")?.forEach((h) => h(undefined, s.ctx));
   started = true;
+  return s.footer;
 }
 
 function runCmd(args: string) {
@@ -164,6 +165,14 @@ describe("startup", () => {
     await new Promise((r) => setTimeout(r, 60));
     expect(api.calls).not.toContain("fetch origin");
     expect(api.messages).toHaveLength(0);
+  });
+
+  it("startupSync=false: footer waits for the first poll, no false 'up to date'", async () => {
+    projectConfig({ startupSync: false });
+    const footer = boot({ dirty: false, behind: 0 });
+    await new Promise((r) => setTimeout(r, 60));
+    expect(footer()).toContain("waiting for next sync");
+    expect(footer()).not.toContain("up to date");
   });
 });
 

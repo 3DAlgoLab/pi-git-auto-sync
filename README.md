@@ -47,7 +47,7 @@ Two layers, later wins: **built-in defaults < CWD file.** Scoping is per-repo â€
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `enabled` | `false` | master switch â€” the extension installs **off**; run `/git-sync on` (or set `enabled: true`) to activate. Off: no polling, no startup sync |
-| `startupSync` | `true` | fetch + fast-forward on session start |
+| `startupSync` | `true` | fetch + fast-forward after the first user interaction (deferred; runs only while the user is present) |
 | `idleMs` | `1800000` | how long the repo may stay dirty before an auto-sync (min 1 min) |
 | `pollMs` | `10000` | poll interval (min 1 s) |
 

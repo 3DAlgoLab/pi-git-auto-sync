@@ -12,7 +12,7 @@ export interface GitAutoSyncConfig {
   enabled?: boolean;
   /** Fetch + fast-forward on session start. Default true. */
   startupSync?: boolean;
-  /** How long the repo may stay dirty before an auto-sync is triggered. Default 30 min. */
+  /** How long the repo may stay dirty before an auto-sync is triggered. Default 60 min. */
   idleMs?: number;
   /** Poll interval. Default 10 s. */
   pollMs?: number;
@@ -21,7 +21,7 @@ export interface GitAutoSyncConfig {
 export const DEFAULTS: Required<GitAutoSyncConfig> = {
   enabled: false,
   startupSync: true,
-  idleMs: 30 * 60 * 1000,
+  idleMs: 60 * 60 * 1000,
   pollMs: 10_000,
 };
 

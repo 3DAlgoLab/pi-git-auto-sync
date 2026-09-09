@@ -250,6 +250,7 @@ async function tick() {
       prevPaths = cur;
     }
     if (!d && dirty) {
+      // re-arm: the grace window restarts on the next new change
       dirty = false;
       dirtyAt = 0;
       prevPaths.clear();
@@ -369,7 +370,7 @@ export default function (pi: ExtensionAPI) {
     }
 
     go();
-    display("starting...");
+    display("waiting for next sync");
     if (cfg.startupSync) {
       // Race the sync against a timeout so a hung fetch can't hold the footer forever.
       // Clear the watchdog when the race settles so it never keeps the process alive.
