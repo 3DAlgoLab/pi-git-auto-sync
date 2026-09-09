@@ -174,6 +174,17 @@ describe("startup", () => {
     expect(footer()).toContain("waiting for next sync");
     expect(footer()).not.toContain("up to date");
   });
+
+  it("startupSync=false: footer never shows 'starting...'", async () => {
+    projectConfig({ startupSync: false });
+    const footer = boot({ dirty: false, behind: 0 });
+    // Sample across the whole startup delay window (500ms default).
+    for (let i = 0; i < 10; i++) {
+      expect(footer()).not.toContain("starting");
+      await new Promise((r) => setTimeout(r, 60));
+    }
+    expect(footer()).toContain("waiting for next sync");
+  });
 });
 
 describe("idle trigger", () => {
