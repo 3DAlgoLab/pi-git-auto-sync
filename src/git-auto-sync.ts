@@ -163,6 +163,24 @@ function triggerSync(count: number) {
 }
 
 /* ---------- startup sync with remote ---------- */
+/**
+ * True when any configured remote actually has a reachable HEAD ref.
+ * Catches two failure shapes: no remote configured, and a configured but
+ * empty/dead remote (e.g. a Gitea repo deleted and re-created upstream —
+ * the remote URL is still in .git/config but 404s).
+ * Local-only repos return false, so the startup sync silently skips them.
+ */
+async function hasRemoteUpstream(): Promise<boolean> {
+  const inside = await execFn("git", ["rev-parse", "--is-inside-work-tree"], { timeout: 10_000 });
+  if (inside.exitCode !== 0 || inside.stdout.trim() !== "true") return false;
+  const remotes = await execFn("git", ["remote"], { timeout: 10_000 });
+  for (const name of remotes.stdout.trim().split("\n").filter(Boolean)) {
+    const probe = await execFn("git", ["ls-remote", "--exit-code", name, "HEAD"], { timeout: 30_000 });
+    if (probe.exitCode === 0) return true;
+  }
+  return false;
+}
+
 async function startupSync() {
   display("fetching origin...");
 
@@ -180,7 +198,16 @@ async function startupSync() {
   }
   const n = parseInt(behind.stdout.trim(), 10) || 0;
   if (n === 0) {
-    display("up to date");
+    // Local is up to date: make sure the remote is, too. Local may hold
+    // commits from an earlier manual sync that were never pushed — that
+    // state blocks every future fast-forward pull (the same deadlock the
+    // idle-sync path resolves). Push before declaring victory.
+    if (await autoPull()) {
+      display("synced with origin");
+      record("On startup, local was up to date with origin; pushed pending local commit(s) so future fast-forward pulls are unblocked.");
+    } else {
+      display("up to date");
+    }
     return;
   }
 
@@ -215,6 +242,33 @@ async function startupSync() {
     ].join("\n"),
   );
   toast(`git-auto-sync: asked agent to pull ${n} commit(s)`, "info");
+}
+
+/**
+ * Push local commits that the remote is missing. Startup's fetch only
+ * reconciles one direction (remote -> local); if a local commit never made
+ * it to origin, the next startup can't fast-forward and the idle-sync path
+ * deadlocks (idle merge refuses to commit while behind, pull refuses to
+ * merge a dirty tree, commit refuses while behind).
+ * Returns true when something was pushed, false when already in sync (or
+ * when the push failed — reported via toast, no exception thrown).
+ */
+async function autoPull(): Promise<boolean> {
+  const ahead = await execFn("git", ["rev-list", "--count", "@{u}..HEAD"]);
+  if (ahead.code !== 0) return false;
+  const k = parseInt(ahead.stdout.trim(), 10) || 0;
+  if (k === 0) return false;
+
+  const dirty = await execFn("git", ["status", "--porcelain", "--untracked-files=no"]);
+  if (dirty.code !== 0 || dirty.stdout.trim().length > 0) return false;
+
+  const push = await execFn("git", ["push"], { timeout: 60_000 });
+  if (push.code !== 0) {
+    toast(`git-auto-sync: local push failed — ${push.stderr.slice(0, 160)}`.trim(), "warning");
+    return false;
+  }
+  toast(`git-auto-sync: pushed ${k} local commit(s) to origin`, "info");
+  return true;
 }
 
 /* ---------- poll tick ---------- */
@@ -371,7 +425,11 @@ export default function (pi: ExtensionAPI) {
 
     go();
     display("waiting for next sync");
-    if (cfg.startupSync) {
+    const startSync = cfg.startupSync && (await hasRemoteUpstream());
+    if (cfg.startupSync && !startSync) {
+      note("git-auto-sync: no reachable remote upstream — skipped startup sync");
+    }
+    if (startSync) {
       // Race the sync against a timeout so a hung fetch can't hold the footer forever.
       // Clear the watchdog when the race settles so it never keeps the process alive.
       let watchdog: ReturnType<typeof setTimeout> | undefined;
