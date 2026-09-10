@@ -427,7 +427,7 @@ export default function (pi: ExtensionAPI) {
     display("waiting for next sync");
     const startSync = cfg.startupSync && (await hasRemoteUpstream());
     if (cfg.startupSync && !startSync) {
-      note("git-auto-sync: no reachable remote upstream — skipped startup sync");
+      toast("git-auto-sync: no reachable remote upstream — skipped startup sync");
     }
     if (startSync) {
       // Race the sync against a timeout so a hung fetch can't hold the footer forever.
